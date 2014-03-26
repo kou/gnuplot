@@ -1,4 +1,3 @@
-gnuplot
-=======
+# gnuplot
 
 gnuplot related code
