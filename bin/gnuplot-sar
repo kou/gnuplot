@@ -1,0 +1,280 @@
+#!/usr/bin/env ruby
+
+# NOTE: It's not completed script.
+
+require "English"
+require "tempfile"
+
+require "pp"
+
+THEME = File.join(__dir__, "../theme.gnuplot")
+OUTPUT = File.basename(File.dirname(ARGV[0]))
+
+class SarParser
+  attr_reader :system_name
+  attr_reader :data_sets
+  def initialize
+    @status = :start
+    @system_name = nil
+    @data_sets = {}
+    @header = nil
+    @label = nil
+    @data_set = nil
+  end
+
+  def <<(line)
+    line = line.chomp
+    if line.empty?
+      @header = nil
+      @data_set = nil
+      return
+    end
+
+    case @status
+    when :start
+      if @system_name.nil?
+        @system_name = line
+        @status = :data_set
+      end
+    when :data_set
+      case line
+      when /\A(\d+:\d+:\d+)\s+/
+        time = $1
+        raw_record = $POSTMATCH.split(/\s+/)
+        if @header.nil?
+          @header = raw_record
+          @label = @header[0]
+          case @label
+          when "CPU", "IFACE"
+            @data_set = {}
+          else
+            @data_set = []
+          end
+          @data_sets[@label] ||= @data_set
+        else
+          add_record(time, raw_record)
+        end
+      when /\AAverage:\s+/
+      else
+        raise "invalid format: <#{line}>"
+      end
+    end
+  end
+
+  private
+  def add_record(time, raw_record)
+    record = {}
+    raw_record.each.with_index do |column, i|
+      column = column.to_f if /\A\d+\.\d+\z/ === column
+      column *= 1024.0 if @label == "IFACE" and @header[i].end_with?("kB/s")
+      record[@header[i]] = column
+    end
+    case @label
+    when "CPU"
+      return if record["CPU"] != "all"
+      data_set = (@data_set[record["CPU"]] ||= [])
+    when "IFACE"
+      return if !["em1", "eth0"].include?(record["IFACE"])
+      data_set = (@data_set[record["IFACE"]] ||= [])
+    else
+      data_set = @data_set
+    end
+    data_set << {
+      :time   => time,
+      :record => record,
+    }
+  end
+end
+
+class CPUGraphGenerator
+  def initialize(system_name, data_sets)
+    @system_name = system_name
+    @data_sets = data_sets
+  end
+
+  def generate
+    data_files = generate_data_files
+    input_file = generate_gnuplot_input(data_files)
+    system("gnuplot", input_file.path)
+  end
+
+  private
+  def generate_data_files
+    data_files = {}
+    @data_sets.each do |cpu, data_set|
+      data_file = Tempfile.new("data-set")
+      data_set.each.with_index do |data, i|
+        data_file.puts([i, *data[:record].values[1..-1]].join("\t"))
+      end
+      data_file.close
+      data_files[cpu] = data_file
+    end
+    data_files
+  end
+
+  def generate_gnuplot_input(data_files)
+    input = Tempfile.new("gnuplot-input")
+    input.puts(<<-INPUT)
+load "#{THEME}";
+
+set output "cpu-#{OUTPUT}.pdf";
+set title "#{@system_name}";
+    INPUT
+
+    plot_data = []
+    data_files.each.with_index do |(label, data_file), i|
+      plot_data << <<-PLOT_DATA.chomp
+"#{data_file.path}" using 1:2 with linespoints linestyle #{i + 1} \\
+  smooth csplines title "#{label}"
+      PLOT_DATA
+    end
+    input.puts("plot [] [0:100] #{plot_data.join(', ')}")
+
+    input.close
+    input
+  end
+end
+
+class GeneralGraphGenerator
+  def initialize(system_name, label, data_set)
+    @system_name = system_name
+    @label = label
+    @data_set = data_set
+  end
+
+  def generate
+    data_files = generate_data_files
+    input_file = generate_gnuplot_input(data_files)
+    system("gnuplot", input_file.path)
+  end
+
+  private
+  def generate_data_files
+    data_files = {}
+    data_file = Tempfile.new("data-set")
+    @data_set.each.with_index do |data, i|
+      data_file.puts([i, *data[:record].values].join("\t"))
+    end
+    data_file.close
+    data_files[@label] = data_file
+    data_files
+  end
+
+  def generate_gnuplot_input(data_files)
+    input = Tempfile.new("gnuplot-input")
+    input.puts(<<-INPUT)
+load "#{THEME}";
+
+set output "#{@label}-#{OUTPUT}.pdf";
+set title "#{@system_name}";
+    INPUT
+
+    plot_data = []
+    data_files.each.with_index do |(label, data_file), i|
+      if OUTPUT == "centos5"
+        target = "2"
+      else
+        target = "3"
+      end
+      plot_data << <<-PLOT_DATA.chomp
+"#{data_file.path}" using 1:#{target} with linespoints linestyle #{i + 1} \\
+  smooth csplines title "#{label}"
+      PLOT_DATA
+    end
+    input.puts("plot [] [0:50000] #{plot_data.join(', ')}")
+
+    input.close
+    input
+  end
+end
+
+class NetworkInterfaceGraphGenerator
+  def initialize(system_name, data_sets)
+    @system_name = system_name
+    @data_sets = data_sets
+  end
+
+  def generate
+    data_files = generate_data_files
+    input_file = generate_gnuplot_input(data_files)
+    system("gnuplot", input_file.path)
+  end
+
+  private
+  def generate_data_files
+    data_files = {}
+    @data_sets.each do |interface, data_set|
+      data_file = Tempfile.new("data-set")
+      data_set.each.with_index do |data, i|
+        data_file.puts([i, *data[:record].values[1..-1]].join("\t"))
+      end
+      data_file.close
+      data_files[interface] = data_file
+    end
+    data_files
+  end
+
+  def generate_gnuplot_input(data_files)
+    input = Tempfile.new("gnuplot-input")
+    input.puts(<<-INPUT)
+load "#{THEME}";
+
+set output "network-interface-#{OUTPUT}.pdf";
+set title "#{@system_name} bond0";
+    INPUT
+
+    plot_data = []
+    data_files.each.with_index do |(label, data_file), i|
+      # puts(File.read(data_file.path))
+#       plot_data << <<-PLOT_DATA.chomp
+# "#{data_file.path}" using 1:2 with linespoints linestyle #{i + 1} \\
+#   smooth csplines title "rxpck/s"
+#       PLOT_DATA
+#       plot_data << <<-PLOT_DATA.chomp
+# "#{data_file.path}" using 1:3 with linespoints linestyle #{i + 2} \\
+#   smooth csplines title "txpck/s"
+#       PLOT_DATA
+      plot_data << <<-PLOT_DATA.chomp
+"#{data_file.path}" using 1:4 with linespoints linestyle #{i + 3} \\
+  smooth csplines title "rxbyt/s"
+      PLOT_DATA
+#       plot_data << <<-PLOT_DATA.chomp
+# "#{data_file.path}" using 1:5 with linespoints linestyle #{i + 4} \\
+#   smooth csplines title "txbyt/s"
+#       PLOT_DATA
+#       plot_data << <<-PLOT_DATA.chomp
+# "#{data_file.path}" using 1:6 with linespoints linestyle #{i + 5} \\
+#   smooth csplines title "rxcmp/s"
+#       PLOT_DATA
+#       plot_data << <<-PLOT_DATA.chomp
+# "#{data_file.path}" using 1:7 with linespoints linestyle #{i + 6} \\
+#   smooth csplines title "txcmp/s"
+#       PLOT_DATA
+#       plot_data << <<-PLOT_DATA.chomp
+# "#{data_file.path}" using 1:8 with linespoints linestyle #{i + 7} \\
+#   smooth csplines title "rxmcst/s"
+#       PLOT_DATA
+    end
+    input.puts("plot [] [0:2000000] #{plot_data.join(', ')}")
+
+    input.close
+    input
+  end
+end
+
+parser = SarParser.new
+ARGF.each_line do |line|
+  parser << line
+end
+
+# generator = CPUGraphGenerator.new(parser.system_name,
+#                                   parser.data_sets["CPU"])
+# generator.generate
+generator = NetworkInterfaceGraphGenerator.new(parser.system_name,
+                                               parser.data_sets["IFACE"])
+generator.generate
+
+# generator = GeneralGraphGenerator.new(parser.system_name,
+#                                       "context-switch",
+#                                       parser.data_sets["cswch/s"] || parser.data_sets["proc/s"])
+# generator.generate
